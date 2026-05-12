@@ -1,0 +1,557 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>SMS Compliance Scanner</title>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@300;400;500&display=swap');
+
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+  :root {
+    --bg: #f5f4f0;
+    --surface: #ffffff;
+    --border: #d8d5cc;
+    --text: #1a1917;
+    --muted: #7a7670;
+    --pass: #1a6b3a;
+    --pass-bg: #e8f5ee;
+    --fail: #8b1a1a;
+    --fail-bg: #fdf0f0;
+    --accent: #1a1917;
+    --score-high: #1a6b3a;
+    --score-mid: #b35c00;
+    --score-low: #8b1a1a;
+  }
+
+  body {
+    font-family: 'IBM Plex Sans', sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    min-height: 100vh;
+    padding: 0;
+  }
+
+  header {
+    background: var(--text);
+    color: var(--bg);
+    padding: 16px 32px;
+    display: flex;
+    align-items: center;
+    gap: 16px;
+    border-bottom: 2px solid var(--text);
+  }
+
+  header h1 {
+    font-family: 'IBM Plex Mono', monospace;
+    font-size: 14px;
+    font-weight: 600;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+  }
+
+  header span {
+    font-family: 'IBM Plex Mono', monospace;
+    font-size: 11px;
+    color: #aaa9a3;
+    letter-spacing: 0.05em;
+  }
+
+  .scan-bar {
+    background: var(--surface);
+    border-bottom: 1px solid var(--border);
+    padding: 20px 32px;
+    display: flex;
+    gap: 12px;
+    align-items: center;
+  }
+
+  .scan-bar input {
+    flex: 1;
+    font-family: 'IBM Plex Mono', monospace;
+    font-size: 13px;
+    padding: 10px 14px;
+    border: 1px solid var(--border);
+    background: var(--bg);
+    color: var(--text);
+    outline: none;
+    transition: border-color 0.15s;
+  }
+
+  .scan-bar input:focus { border-color: var(--text); }
+
+  .scan-bar input::placeholder { color: var(--muted); }
+
+  .scan-bar button {
+    font-family: 'IBM Plex Mono', monospace;
+    font-size: 12px;
+    font-weight: 600;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    padding: 10px 20px;
+    background: var(--text);
+    color: var(--bg);
+    border: none;
+    cursor: pointer;
+    transition: opacity 0.15s;
+  }
+
+  .scan-bar button:hover { opacity: 0.8; }
+  .scan-bar button:disabled { opacity: 0.4; cursor: not-allowed; }
+
+  .container {
+    max-width: 960px;
+    margin: 0 auto;
+    padding: 32px 32px;
+  }
+
+  /* Summary row */
+  .summary {
+    display: grid;
+    grid-template-columns: 1fr 1fr 1fr auto;
+    gap: 1px;
+    background: var(--border);
+    border: 1px solid var(--border);
+    margin-bottom: 28px;
+  }
+
+  .summary-cell {
+    background: var(--surface);
+    padding: 20px 24px;
+  }
+
+  .summary-cell .label {
+    font-family: 'IBM Plex Mono', monospace;
+    font-size: 10px;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    color: var(--muted);
+    margin-bottom: 8px;
+  }
+
+  .summary-cell .value {
+    font-family: 'IBM Plex Mono', monospace;
+    font-size: 20px;
+    font-weight: 600;
+    color: var(--text);
+    word-break: break-all;
+  }
+
+  .summary-cell .value.score-high { color: var(--score-high); }
+  .summary-cell .value.score-mid { color: var(--score-mid); }
+  .summary-cell .value.score-low { color: var(--score-low); }
+
+  .verdict {
+    background: var(--surface);
+    padding: 20px 24px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+
+  .verdict-badge {
+    font-family: 'IBM Plex Mono', monospace;
+    font-size: 11px;
+    font-weight: 600;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    padding: 6px 14px;
+    border: 1.5px solid;
+  }
+
+  .verdict-badge.pass { color: var(--pass); border-color: var(--pass); background: var(--pass-bg); }
+  .verdict-badge.fail { color: var(--fail); border-color: var(--fail); background: var(--fail-bg); }
+
+  /* Sections */
+  .section {
+    margin-bottom: 24px;
+    border: 1px solid var(--border);
+    background: var(--surface);
+  }
+
+  .section-header {
+    padding: 14px 20px;
+    border-bottom: 1px solid var(--border);
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    background: #faf9f7;
+  }
+
+  .section-title {
+    font-family: 'IBM Plex Mono', monospace;
+    font-size: 11px;
+    font-weight: 600;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    color: var(--text);
+  }
+
+  .section-meta {
+    font-family: 'IBM Plex Mono', monospace;
+    font-size: 11px;
+    color: var(--muted);
+  }
+
+  /* Check rows */
+  .check-row {
+    display: grid;
+    grid-template-columns: 28px 1fr auto;
+    gap: 0;
+    border-bottom: 1px solid var(--border);
+    align-items: start;
+  }
+
+  .check-row:last-child { border-bottom: none; }
+
+  .check-indicator {
+    padding: 14px 0 14px 16px;
+    font-size: 13px;
+    line-height: 1;
+    padding-top: 15px;
+  }
+
+  .check-indicator.pass { color: var(--pass); }
+  .check-indicator.fail { color: var(--fail); }
+
+  .check-body {
+    padding: 12px 16px 12px 8px;
+  }
+
+  .check-name {
+    font-family: 'IBM Plex Mono', monospace;
+    font-size: 12px;
+    font-weight: 500;
+    color: var(--text);
+    margin-bottom: 3px;
+  }
+
+  .check-desc {
+    font-size: 12px;
+    color: var(--muted);
+    line-height: 1.5;
+    margin-bottom: 4px;
+  }
+
+  .check-detail {
+    font-size: 12px;
+    color: var(--text);
+    line-height: 1.5;
+  }
+
+  .check-detail a {
+    color: var(--text);
+    font-family: 'IBM Plex Mono', monospace;
+    font-size: 11px;
+    word-break: break-all;
+  }
+
+  .check-status {
+    padding: 14px 16px 14px 0;
+    font-family: 'IBM Plex Mono', monospace;
+    font-size: 10px;
+    font-weight: 600;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    white-space: nowrap;
+  }
+
+  .check-status.pass { color: var(--pass); }
+  .check-status.fail { color: var(--fail); }
+
+  /* Consent text block */
+  .consent-block {
+    padding: 16px 20px;
+    background: #faf9f7;
+    border-top: 1px solid var(--border);
+  }
+
+  .consent-label {
+    font-family: 'IBM Plex Mono', monospace;
+    font-size: 10px;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    color: var(--muted);
+    margin-bottom: 10px;
+  }
+
+  .consent-text {
+    font-size: 12px;
+    line-height: 1.7;
+    color: var(--text);
+    font-style: italic;
+  }
+
+  /* Page snapshot */
+  .snapshot-block {
+    padding: 16px 20px;
+    background: #faf9f7;
+    border-top: 1px solid var(--border);
+  }
+
+  .snapshot-text {
+    font-family: 'IBM Plex Mono', monospace;
+    font-size: 11px;
+    line-height: 1.7;
+    color: var(--muted);
+    white-space: pre-wrap;
+    max-height: 120px;
+    overflow: hidden;
+    -webkit-mask-image: linear-gradient(to bottom, black 60%, transparent 100%);
+    mask-image: linear-gradient(to bottom, black 60%, transparent 100%);
+  }
+
+  /* Loading */
+  .loading {
+    text-align: center;
+    padding: 60px 20px;
+    font-family: 'IBM Plex Mono', monospace;
+    font-size: 12px;
+    color: var(--muted);
+    letter-spacing: 0.05em;
+  }
+
+  .loading::after {
+    content: '';
+    animation: dots 1.2s infinite;
+  }
+
+  @keyframes dots {
+    0%   { content: ''; }
+    33%  { content: '.'; }
+    66%  { content: '..'; }
+    100% { content: '...'; }
+  }
+
+  .error-msg {
+    padding: 20px;
+    background: var(--fail-bg);
+    border: 1px solid #e8c0c0;
+    color: var(--fail);
+    font-family: 'IBM Plex Mono', monospace;
+    font-size: 12px;
+    margin-bottom: 20px;
+  }
+
+  .placeholder-msg {
+    text-align: center;
+    padding: 80px 20px;
+    color: var(--muted);
+    font-size: 13px;
+    line-height: 1.8;
+  }
+
+  .placeholder-msg strong {
+    display: block;
+    font-family: 'IBM Plex Mono', monospace;
+    font-size: 12px;
+    color: var(--text);
+    margin-bottom: 8px;
+    letter-spacing: 0.05em;
+  }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>SMS Compliance Scanner</h1>
+  <span>/ TCPA &amp; 10DLC Checks</span>
+</header>
+
+<div class="scan-bar">
+  <input type="text" id="urlInput" placeholder="https://example.com" />
+  <button id="scanBtn" onclick="runScan()">Scan</button>
+</div>
+
+<div class="container" id="output">
+  <div class="placeholder-msg">
+    <strong>Enter a URL above to begin</strong>
+    Scans consent message, phone field, checkbox, privacy policy, and terms of service.
+  </div>
+</div>
+
+<script>
+  const API = window.SCANNER_API_URL || '/scan';
+
+  function fmt(key) {
+    return key.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
+  }
+
+  function esc(value) {
+    return String(value ?? '').replace(/[&<>"']/g, char => ({
+      '&': '&amp;',
+      '<': '&lt;',
+      '>': '&gt;',
+      '"': '&quot;',
+      "'": '&#39;'
+    }[char]));
+  }
+
+  function safeHref(value) {
+    try {
+      const url = new URL(value);
+      return ['http:', 'https:'].includes(url.protocol) ? url.href : '';
+    } catch {
+      return '';
+    }
+  }
+
+  function scoreClass(score, max) {
+    const pct = score / max;
+    if (pct >= 0.75) return 'score-high';
+    if (pct >= 0.4) return 'score-mid';
+    return 'score-low';
+  }
+
+  function renderCheck(key, check) {
+    const cls = check.pass ? 'pass' : 'fail';
+    const icon = check.pass ? '✓' : '✗';
+    const statusLabel = check.pass ? 'Pass' : 'Fail';
+
+    let detail = check.detail || '';
+    // strip leading ✓/✗ from detail since we show our own icon
+    detail = detail.replace(/^[✓✗]\s*/, '');
+
+    let linkHtml = '';
+    const href = safeHref(check.href);
+    if (href) {
+      linkHtml = `<br><a href="${esc(href)}" target="_blank" rel="noopener noreferrer">${esc(href)}</a>`;
+    }
+
+    return `
+      <div class="check-row">
+        <div class="check-indicator ${cls}">${icon}</div>
+        <div class="check-body">
+          <div class="check-name">${esc(fmt(key))}</div>
+          <div class="check-desc">${esc(check.description)}</div>
+          ${detail ? `<div class="check-detail">${esc(detail)}${linkHtml}</div>` : ''}
+        </div>
+        <div class="check-status ${cls}">${statusLabel}</div>
+      </div>
+    `;
+  }
+
+  function renderSection(title, checks, meta, extra) {
+    const keys = Object.keys(checks);
+    const passed = keys.filter(k => checks[k].pass).length;
+
+    let rows = keys.map(k => renderCheck(k, checks[k])).join('');
+
+    return `
+      <div class="section">
+        <div class="section-header">
+          <div class="section-title">${esc(title)}</div>
+          <div class="section-meta">${passed}/${keys.length} passed${meta ? ' · ' + esc(meta) : ''}</div>
+        </div>
+        ${rows}
+        ${extra || ''}
+      </div>
+    `;
+  }
+
+  function render(data) {
+    // figure out max score heuristically (count all checks)
+    let totalChecks = 0;
+    for (const group of Object.values(data.checks)) {
+      totalChecks += Object.keys(group).length;
+    }
+    for (const page of ['tos_page', 'privacy_page']) {
+      if (data[page] && data[page].checks) {
+        totalChecks += Object.keys(data[page].checks).length;
+      }
+    }
+
+    const sc = scoreClass(data.form_score, totalChecks);
+    const overallCls = data.overall_pass ? 'pass' : 'fail';
+    const overallLabel = data.overall_pass ? 'Pass' : 'Fail';
+
+    const consentExtra = data.consent_text_found ? `
+      <div class="consent-block">
+        <div class="consent-label">Consent Text Found</div>
+        <div class="consent-text">${esc(data.consent_text_found)}</div>
+      </div>
+    ` : '';
+
+    // Privacy page snapshot
+    const privacySnap = data.privacy_page?.page_text_snapshot ? `
+      <div class="snapshot-block">
+        <div class="consent-label">Page Snapshot</div>
+        <div class="snapshot-text">${esc(data.privacy_page.page_text_snapshot)}</div>
+      </div>
+    ` : '';
+
+    const privacyExtra = privacySnap;
+
+    // Consent message section
+    const consentSection = renderSection(
+      'Consent Message',
+      data.checks.consent_message,
+      `source: ${data.form_source}`,
+      consentExtra
+    );
+
+    // Phone field section
+    const phoneSection = renderSection('Phone Field', data.checks.phone_field, null, null);
+
+    // Checkbox section
+    const cbSection = renderSection('Consent Checkbox', data.checks.consent_checkbox, null, null);
+
+    // TOS page
+    let tosSection = '';
+    if (data.tos_page) {
+      const tosChecks = data.tos_page.checks || {};
+      tosSection = renderSection('Terms of Service Page', tosChecks, '', '');
+    }
+
+    // Privacy page
+    let privacySection = '';
+    if (data.privacy_page && data.privacy_page.checks) {
+      privacySection = renderSection('Privacy Policy Page', data.privacy_page.checks, '', privacyExtra);
+    }
+
+    document.getElementById('output').innerHTML = `
+      
+
+      ${consentSection}
+      ${phoneSection}
+      ${cbSection}
+      ${tosSection}
+      ${privacySection}
+    `;
+  }
+
+  async function runScan() {
+    const url = document.getElementById('urlInput').value.trim();
+    if (!url) return;
+
+    const btn = document.getElementById('scanBtn');
+    btn.disabled = true;
+    document.getElementById('output').innerHTML = '<div class="loading">Scanning</div>';
+
+    try {
+      const res = await fetch(API, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ url })
+      });
+
+      if (!res.ok) throw new Error(`Server returned ${res.status}`);
+      const data = await res.json();
+      render(data);
+    } catch (err) {
+      document.getElementById('output').innerHTML = `
+        <div class="error-msg">Error: ${esc(err.message)}. Make sure the server is running at ${esc(API)}.</div>
+      `;
+    } finally {
+      btn.disabled = false;
+    }
+  }
+
+  // Press Enter to scan
+  document.getElementById('urlInput').addEventListener('keydown', e => {
+    if (e.key === 'Enter') runScan();
+  });
+</script>
+</body>
+</html>
