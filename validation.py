@@ -55,9 +55,10 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_URL   = "https://www.myrightslawgroup.com/contact-us/"
 WAIT_SECONDS  = int(os.getenv("SELENIUM_WAIT_SECONDS", "10"))
-PAGE_SETTLE   = float(os.getenv("PAGE_SETTLE_SECONDS", "4"))
+PAGE_SETTLE   = float(os.getenv("PAGE_SETTLE_SECONDS", "2"))
 IFRAME_SETTLE = float(os.getenv("IFRAME_SETTLE_SECONDS", "1"))
 PAGE_LOAD_TIMEOUT = int(os.getenv("PAGE_LOAD_TIMEOUT_SECONDS", "45"))
+PAGE_LOAD_STRATEGY = os.getenv("PAGE_LOAD_STRATEGY", "eager")
 MIN_SCORE     = int(os.getenv("MIN_FORM_SCORE", "2"))
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -793,6 +794,7 @@ def compute_overall_pass(result: dict) -> bool:
 
 def create_driver() -> webdriver.Chrome:
     options = webdriver.ChromeOptions()
+    options.page_load_strategy = PAGE_LOAD_STRATEGY
     options.add_argument("--headless=new")
     options.add_argument("--no-sandbox")
     options.add_argument("--disable-dev-shm-usage")

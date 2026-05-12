@@ -536,7 +536,14 @@
         body: JSON.stringify({ url })
       });
 
-      if (!res.ok) throw new Error(`Server returned ${res.status}`);
+      if (!res.ok) {
+        let message = `Server returned ${res.status}`;
+        try {
+          const errorData = await res.json();
+          if (errorData.detail) message = errorData.detail;
+        } catch {}
+        throw new Error(message);
+      }
       const data = await res.json();
       render(data);
     } catch (err) {

@@ -17,7 +17,7 @@ logging.basicConfig(
     format="%(asctime)s %(levelname)s %(name)s %(message)s",
 )
 
-SCAN_TIMEOUT_SECONDS = int(os.getenv("SCAN_TIMEOUT_SECONDS", "90"))
+SCAN_TIMEOUT_SECONDS = int(os.getenv("SCAN_TIMEOUT_SECONDS", "240"))
 MAX_CONCURRENT_SCANS = int(os.getenv("MAX_CONCURRENT_SCANS", "2"))
 ALLOWED_ORIGINS = [
     origin.strip()
@@ -101,7 +101,13 @@ async def scan_endpoint(request: ScanRequest):
     try:
         return await asyncio.wait_for(asyncio.shield(scan_task), timeout=SCAN_TIMEOUT_SECONDS)
     except asyncio.TimeoutError:
-        raise HTTPException(status_code=504, detail="Scan timed out.")
+        raise HTTPException(
+            status_code=504,
+            detail=(
+                f"Scan timed out after {SCAN_TIMEOUT_SECONDS} seconds. "
+                "Try again, or increase SCAN_TIMEOUT_SECONDS for slow websites."
+            ),
+        )
     except HTTPException:
         raise
     except Exception as exc:

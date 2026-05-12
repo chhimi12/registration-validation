@@ -25,10 +25,11 @@ docker run --rm -p 8000:8000 registration-validation
 | `PORT` | `8000` | HTTP port used by Uvicorn |
 | `ALLOWED_ORIGINS` | `*` | Comma-separated CORS origins |
 | `MAX_CONCURRENT_SCANS` | `2` | Limits simultaneous Chrome scans |
-| `SCAN_TIMEOUT_SECONDS` | `90` | API timeout per scan |
+| `SCAN_TIMEOUT_SECONDS` | `240` | API timeout per scan |
 | `PAGE_LOAD_TIMEOUT_SECONDS` | `45` | Selenium page-load timeout |
 | `SELENIUM_WAIT_SECONDS` | `10` | Selenium explicit wait timeout |
-| `PAGE_SETTLE_SECONDS` | `4` | Extra wait after page navigation |
+| `PAGE_SETTLE_SECONDS` | `2` | Extra wait after page navigation |
+| `PAGE_LOAD_STRATEGY` | `eager` | Selenium page-load strategy; `eager` avoids waiting for every image/ad/script |
 | `IFRAME_SETTLE_SECONDS` | `1` | Extra wait after iframe navigation |
 | `MIN_FORM_SCORE` | `2` | Minimum contact-form score |
 | `CHROME_BINARY` | `/usr/bin/chromium` in Docker | Chrome/Chromium binary path |
