@@ -174,3 +174,39 @@ NO_MOBILE_SHARING_PATTERN = re.compile(
     r"no\s+mobile\s+information\s+will\s+be\s+shared\s+with\s+third.part",
     re.IGNORECASE,
 )
+
+# ── Firm name extraction helpers ──────────────────────────────────────────────
+
+# Patterns that strongly indicate a law firm name in structured markup
+FIRM_NAME_SCHEMA_TYPES = re.compile(
+    r"LegalService|LawFirm|Attorney|Lawyer|Organization",
+    re.IGNORECASE,
+)
+
+# Common noise words to strip when cleaning a candidate firm name
+FIRM_NAME_NOISE = re.compile(
+    r"\b(LLC|LLP|PC|PLLC|PA|APC|Esq\.?|Attorney|Attorneys|Law\s+Firm|"
+    r"Law\s+Office|Law\s+Group|Lawyers?|Legal|Group|Associates?|"
+    r"Injury\s+Lawyers?|Trial\s+Lawyers?|Accident\s+Lawyers?)\b",
+    re.IGNORECASE,
+)
+
+# Footer / about selectors that often contain the canonical firm name
+FIRM_NAME_FOOTER_SELECTORS = [
+    "footer [class*='logo' i]",
+    "footer [class*='firm' i]",
+    "footer [class*='brand' i]",
+    "footer [class*='copyright' i]",
+    "footer p",
+    "[class*='footer-logo' i]",
+    "[class*='site-logo' i] img",          # alt text
+    "[class*='navbar-brand' i]",
+    "[class*='site-title' i]",
+    "[rel='author']",
+]
+
+# Copyright line pattern — captures the firm name after © YYYY
+COPYRIGHT_FIRM_PATTERN = re.compile(
+    r"©\s*\d{4}[\s\-–]+(.+?)(?:\.|,|All\s+Rights|LLC|LLP|PC|PLLC|\n|$)",
+    re.IGNORECASE,
+)

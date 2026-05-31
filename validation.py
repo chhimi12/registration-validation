@@ -1,19 +1,34 @@
 """
-find_contact_form.py
+validation.py
 --------------------
 1. Finds the highest-scoring contact form on an attorney website (main page + iframes).
 2. Runs compliance validation on that form:
-     - Consent message content checks
+     - Consent message content checks  (aggregated across ALL consent blocks)
      - Phone field "not required" check
      - Consent checkbox "not pre-checked" check
 3. Navigates to Terms of Service page and validates its content.
 4. Navigates to Privacy Policy page and validates its content.
 
+Link-discovery order for Privacy Policy / Terms of Service:
+  1. Any consent block(s) inside the form
+  2. The form element itself (outside the consent block)
+  3. The page body (document-wide anchor scan)
+  4. The page footer (reported separately as a footer-link check)
+
+Firm-name detection order (most → least reliable):
+  1. JSON-LD schema.org  (LegalService / LawFirm / Organization name)
+  2. Copyright line in footer  (© YYYY Firm Name …)
+  3. Footer logo alt-text / brand elements
+  4. og:site_name meta tag
+  5. <title> tag (noise-stripped)
+  6. First meaningful <h1>
+  7. Hostname (last resort)
+
 Returns a structured JSON result suitable for connecting to a frontend.
 
 Usage:
   pip install selenium
-  python find_contact_form.py https://www.example-lawfirm.com/contact
+  python validation.py https://www.example-lawfirm.com/contact
 """
 
 import sys
@@ -24,7 +39,7 @@ import logging
 import os
 from urllib.parse import urlparse
 from dataclasses import dataclass, field
-from typing import Optional, List
+from typing import Optional, List, Dict
 
 from selenium import webdriver
 from selenium.webdriver.chrome.service import Service
@@ -36,7 +51,10 @@ from validation_rules import (
     ATTORNEY_CTA_WORDS,
     CONSENT_CHECKBOX_FALLBACK,
     CONSENT_CHECKBOX_SELECTORS,
+    COPYRIGHT_FIRM_PATTERN,
     FIELD_SIGNALS,
+    FIRM_NAME_FOOTER_SELECTORS,
+    FIRM_NAME_SCHEMA_TYPES,
     FORM_CONSENT_PHRASE_RULES,
     FORM_IFRAME_SRC_PATTERNS,
     LINK_SELECTORS,
@@ -53,20 +71,19 @@ from validation_rules import (
 # ── CONFIG ────────────────────────────────────────────────────────────────────
 logger = logging.getLogger(__name__)
 
-DEFAULT_URL   = "https://www.myrightslawgroup.com/contact-us/"
-WAIT_SECONDS  = int(os.getenv("SELENIUM_WAIT_SECONDS", "10"))
-PAGE_SETTLE   = float(os.getenv("PAGE_SETTLE_SECONDS", "2"))
-IFRAME_SETTLE = float(os.getenv("IFRAME_SETTLE_SECONDS", "1"))
-PAGE_LOAD_TIMEOUT = int(os.getenv("PAGE_LOAD_TIMEOUT_SECONDS", "45"))
+DEFAULT_URL        = "https://www.spetsasbuist.com/contact/"
+WAIT_SECONDS       = int(os.getenv("SELENIUM_WAIT_SECONDS", "10"))
+PAGE_SETTLE        = float(os.getenv("PAGE_SETTLE_SECONDS", "2"))
+IFRAME_SETTLE      = float(os.getenv("IFRAME_SETTLE_SECONDS", "1"))
+PAGE_LOAD_TIMEOUT  = int(os.getenv("PAGE_LOAD_TIMEOUT_SECONDS", "45"))
 PAGE_LOAD_STRATEGY = os.getenv("PAGE_LOAD_STRATEGY", "eager")
-MIN_SCORE     = int(os.getenv("MIN_FORM_SCORE", "2"))
+MIN_SCORE          = int(os.getenv("MIN_FORM_SCORE", "2"))
 # ─────────────────────────────────────────────────────────────────────────────
 
 
 # ══════════════════════════════════════════════════════════════════════════════
 #  FORM FINDER
 # ══════════════════════════════════════════════════════════════════════════════
-
 
 @dataclass
 class ScoredForm:
@@ -199,20 +216,99 @@ def find_contact_form(driver) -> Optional[ScoredForm]:
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  FIRM NAME EXTRACTION
+#  FIRM NAME EXTRACTION  (multi-heuristic, most → least reliable)
 # ══════════════════════════════════════════════════════════════════════════════
+
+def _clean_firm_candidate(text: str) -> str:
+    """Strip whitespace and trailing punctuation from a firm-name candidate."""
+    return re.sub(r"[\s,.|]+$", "", text.strip())
+
 
 def extract_firm_name(driver, page_url: str) -> str:
     """
     Try several heuristics to get the firm name, in order of reliability:
-      1. og:site_name meta
-      2. <title> tag
-      3. First <h1> on the page
-      4. Hostname cleaned up (last resort)
+      1. JSON-LD schema.org markup  (LegalService / LawFirm / Organization)
+      2. Copyright line in footer
+      3. Footer logo alt-text / brand elements
+      4. og:site_name meta
+      5. <title> tag (noise-stripped)
+      6. First meaningful <h1>
+      7. Hostname (last resort)
     """
-    candidates = []
+    candidates: List[str] = []
 
-    # 1. og:site_name
+    # ── 1. JSON-LD schema.org ─────────────────────────────────────────────────
+    try:
+        scripts = driver.find_elements(By.CSS_SELECTOR, "script[type='application/ld+json']")
+        for script in scripts:
+            try:
+                raw = script.get_attribute("innerHTML") or ""
+                data = json.loads(raw)
+                # data may be a single object or a list
+                items = data if isinstance(data, list) else [data]
+                for item in items:
+                    # Handle @graph arrays
+                    if "@graph" in item:
+                        items.extend(item["@graph"])
+                        continue
+                    schema_type = item.get("@type", "")
+                    if FIRM_NAME_SCHEMA_TYPES.search(str(schema_type)):
+                        name = item.get("name", "").strip()
+                        if name and len(name) > 2:
+                            logger.info("Firm name from JSON-LD: %s", name)
+                            candidates.append(name)
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+    if candidates:
+        return _clean_firm_candidate(candidates[0])
+
+    # ── 2. Copyright line in footer ───────────────────────────────────────────
+    try:
+        footer_els = driver.find_elements(By.CSS_SELECTOR, "footer, [class*='footer' i], [id*='footer' i]")
+        for footer in footer_els:
+            footer_text = footer.text or ""
+            m = COPYRIGHT_FIRM_PATTERN.search(footer_text)
+            if m:
+                name = _clean_firm_candidate(m.group(1))
+                if len(name) > 2:
+                    logger.info("Firm name from copyright line: %s", name)
+                    candidates.append(name)
+                    break
+    except Exception:
+        pass
+
+    if candidates:
+        return candidates[0]
+
+    # ── 3. Footer logo alt-text / brand elements ──────────────────────────────
+    try:
+        for sel in FIRM_NAME_FOOTER_SELECTORS:
+            els = driver.find_elements(By.CSS_SELECTOR, sel)
+            for el in els:
+                # Try alt attribute (images), then text content
+                text = (
+                    el.get_attribute("alt")
+                    or el.get_attribute("title")
+                    or el.text
+                    or ""
+                ).strip()
+                # Skip generic labels
+                if text and len(text) > 4 and not re.match(r"^(home|logo|menu|nav)$", text, re.I):
+                    logger.info("Firm name from footer element (%s): %s", sel, text)
+                    candidates.append(text)
+                    break
+            if candidates:
+                break
+    except Exception:
+        pass
+
+    if candidates:
+        return _clean_firm_candidate(candidates[0])
+
+    # ── 4. og:site_name ───────────────────────────────────────────────────────
     try:
         og = driver.find_element(By.CSS_SELECTOR, "meta[property='og:site_name']")
         val = og.get_attribute("content")
@@ -221,16 +317,23 @@ def extract_firm_name(driver, page_url: str) -> str:
     except Exception:
         pass
 
-    # 2. <title> — strip common suffixes
+    if candidates:
+        return _clean_firm_candidate(candidates[0])
+
+    # ── 5. <title> tag (noise-stripped) ──────────────────────────────────────
     try:
         title = driver.title or ""
+        # Keep only the part before the first separator
         title = re.sub(r"\s*[-|–—]\s*.*$", "", title).strip()
         if title and len(title) > 2:
             candidates.append(title)
     except Exception:
         pass
 
-    # 3. First meaningful h1
+    if candidates:
+        return _clean_firm_candidate(candidates[0])
+
+    # ── 6. First meaningful <h1> ──────────────────────────────────────────────
     try:
         h1s = driver.find_elements(By.TAG_NAME, "h1")
         for h1 in h1s:
@@ -241,7 +344,10 @@ def extract_firm_name(driver, page_url: str) -> str:
     except Exception:
         pass
 
-    # 4. Hostname as last resort
+    if candidates:
+        return _clean_firm_candidate(candidates[0])
+
+    # ── 7. Hostname (last resort) ─────────────────────────────────────────────
     try:
         hostname = urlparse(page_url).hostname or ""
         hostname = re.sub(r"^www\.", "", hostname)
@@ -252,26 +358,148 @@ def extract_firm_name(driver, page_url: str) -> str:
     except Exception:
         pass
 
-    return candidates[0] if candidates else "Unknown Firm"
+    return _clean_firm_candidate(candidates[0]) if candidates else "Unknown Firm"
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  COMPLIANCE VALIDATOR — CONTACT FORM
+#  LINK DISCOVERY  (multi-scope: consent blocks → form → page body → footer)
 # ══════════════════════════════════════════════════════════════════════════════
 
+def _extract_links_from_element(el, driver) -> Dict[str, Optional[str]]:
+    """Return privacy / ToS hrefs found inside *el* (or None if not found)."""
+    links: Dict[str, Optional[str]] = {"privacy_policy": None, "terms_of_service": None}
+    for link_key, link_sel in LINK_SELECTORS.items():
+        try:
+            link_el = el.find_element(By.CSS_SELECTOR, link_sel)
+            links[link_key] = link_el.get_attribute("href")
+        except Exception:
+            pass
+    return links
 
-def find_consent_block(form_el, driver) -> dict:
+
+def _merge_links(base: Dict, update: Dict) -> Dict:
+    """Fill in None values in *base* with values from *update*."""
+    return {k: base[k] if base[k] is not None else update[k] for k in base}
+
+
+def discover_policy_links(form_el, driver) -> Dict:
     """
-    Locate the consent / SMS disclosure inside the form.
-    Returns { "text": str, "element": el | None, "links": {privacy: url, terms: url} }
+    Search for Privacy Policy and Terms of Service links in widening scopes:
+      1. All consent blocks inside the form
+      2. The form element itself
+      3. The full page body
+      4. The footer (stored separately for the footer-link check)
+
+    Returns:
+      {
+        "privacy_policy": url | None,
+        "terms_of_service": url | None,
+        "privacy_policy_footer": url | None,
+        "terms_of_service_footer": url | None,
+        "privacy_policy_source": "consent_block" | "form" | "page" | "footer" | None,
+        "terms_of_service_source": ...
+      }
+    """
+    found: Dict[str, Optional[str]] = {"privacy_policy": None, "terms_of_service": None}
+    sources: Dict[str, Optional[str]] = {"privacy_policy": None, "terms_of_service": None}
+
+    # ── Scope 1: all consent blocks inside the form ───────────────────────────
+    CONSENT_TEXT_SELECTOR = "p, div, span, label, li"
+    try:
+        candidates = form_el.find_elements(By.CSS_SELECTOR, CONSENT_TEXT_SELECTOR)
+        for el in candidates:
+            try:
+                text = (el.text or "").strip()
+                if not (
+                    SMS_KEYWORD_PATTERN.search(text)
+                    or "consent" in text.lower()
+                    or "opt-out" in text.lower()
+                ):
+                    continue
+                links = _extract_links_from_element(el, driver)
+                for k in ("privacy_policy", "terms_of_service"):
+                    if found[k] is None and links[k]:
+                        found[k] = links[k]
+                        sources[k] = "consent_block"
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+    # ── Scope 2: form element itself ──────────────────────────────────────────
+    if None in found.values():
+        form_links = _extract_links_from_element(form_el, driver)
+        for k in ("privacy_policy", "terms_of_service"):
+            if found[k] is None and form_links[k]:
+                found[k] = form_links[k]
+                sources[k] = "form"
+
+    # ── Scope 3: full page body ───────────────────────────────────────────────
+    if None in found.values():
+        try:
+            body = driver.find_element(By.TAG_NAME, "body")
+            body_links = _extract_links_from_element(body, driver)
+            for k in ("privacy_policy", "terms_of_service"):
+                if found[k] is None and body_links[k]:
+                    found[k] = body_links[k]
+                    sources[k] = "page"
+        except Exception:
+            pass
+
+    # ── Scope 4: footer (separate — used for the footer-link check) ───────────
+    footer_links: Dict[str, Optional[str]] = {"privacy_policy": None, "terms_of_service": None}
+    try:
+        footer_els = driver.find_elements(
+            By.CSS_SELECTOR, "footer, [class*='footer' i], [id*='footer' i]"
+        )
+        for footer in footer_els:
+            fl = _extract_links_from_element(footer, driver)
+            for k in ("privacy_policy", "terms_of_service"):
+                if footer_links[k] is None and fl[k]:
+                    footer_links[k] = fl[k]
+                    # Also promote to main found if still missing
+                    if found[k] is None:
+                        found[k] = fl[k]
+                        sources[k] = "footer"
+    except Exception:
+        pass
+
+    return {
+        "privacy_policy": found["privacy_policy"],
+        "terms_of_service": found["terms_of_service"],
+        "privacy_policy_source": sources["privacy_policy"],
+        "terms_of_service_source": sources["terms_of_service"],
+        "privacy_policy_footer": footer_links["privacy_policy"],
+        "terms_of_service_footer": footer_links["terms_of_service"],
+    }
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  CONSENT BLOCK AGGREGATION  (collect ALL consent blocks, not just the first)
+# ══════════════════════════════════════════════════════════════════════════════
+
+def find_all_consent_blocks(form_el, driver) -> dict:
+    """
+    Locate ALL consent / SMS disclosure blocks inside the form and aggregate
+    their text.  This handles forms where the disclosure is split across
+    multiple <div> / <p> / <label> elements with different CSS classes.
+
+    Returns:
+      {
+        "text": "<aggregated text of all consent blocks>",
+        "blocks": [ { "text": ..., "element": el }, ... ],
+        "links": { "privacy_policy": url | None, "terms_of_service": url | None },
+      }
     """
     result = {
         "text": "",
-        "element": None,
+        "blocks": [],
         "links": {"privacy_policy": None, "terms_of_service": None},
     }
 
-    # Strategy 1: checkbox label that contains SMS / consent text
+    seen_texts = set()
+
+    # ── Strategy 1: checkbox labels with SMS / consent text ───────────────────
     try:
         checkboxes = form_el.find_elements(By.CSS_SELECTOR, "input[type='checkbox']")
         for cb in checkboxes:
@@ -279,59 +507,67 @@ def find_consent_block(form_el, driver) -> dict:
             if cb_id:
                 try:
                     lbl = form_el.find_element(By.CSS_SELECTOR, f"label[for='{cb_id}']")
-                    label_text = lbl.text or ""
-                    if SMS_KEYWORD_PATTERN.search(label_text) or "consent" in label_text.lower() or len(label_text) > 60:
-                        result["text"] = label_text.strip()
-                        result["element"] = lbl
-                        for link_key, link_sel in LINK_SELECTORS.items():
-                            try:
-                                link_el = lbl.find_element(By.CSS_SELECTOR, link_sel)
-                                result["links"][link_key] = link_el.get_attribute("href")
-                            except Exception:
-                                pass
-                        if result["text"]:
-                            return result
+                    label_text = (lbl.text or "").strip()
+                    if (
+                        SMS_KEYWORD_PATTERN.search(label_text)
+                        or "consent" in label_text.lower()
+                        or len(label_text) > 60
+                    ) and label_text not in seen_texts:
+                        seen_texts.add(label_text)
+                        result["blocks"].append({"text": label_text, "element": lbl})
+                        links = _extract_links_from_element(lbl, driver)
+                        for k in ("privacy_policy", "terms_of_service"):
+                            if result["links"][k] is None and links[k]:
+                                result["links"][k] = links[k]
                 except Exception:
                     pass
-            val = cb.get_attribute("value") or ""
-            if SMS_KEYWORD_PATTERN.search(val) or len(val) > 60:
-                result["text"] = val.strip()
-                result["element"] = cb
     except Exception:
         pass
 
-    # Strategy 2: any <p> / <div> / <span> / <label> / <li> containing SMS-related or consent text
+    # ── Strategy 2: any consent-bearing text elements in the form ─────────────
     CONSENT_TEXT_SELECTOR = "p, div, span, label, li"
     try:
         candidates = form_el.find_elements(By.CSS_SELECTOR, CONSENT_TEXT_SELECTOR)
-        best_candidate = None
-        best_len = 0
         for el in candidates:
             try:
                 text = (el.text or "").strip()
-                if (
+                if not text or text in seen_texts:
+                    continue
+                if not (
                     SMS_KEYWORD_PATTERN.search(text)
                     or "consent" in text.lower()
                     or "opt-out" in text.lower()
-                ) and len(text) > best_len:
-                    best_candidate = el
-                    best_len = len(text)
+                    or "message and data" in text.lower()
+                    or "reply stop" in text.lower()
+                ):
+                    continue
+                # Skip elements whose text is fully contained in an already-found block
+                # (avoids parent/child duplication)
+                already_covered = any(
+                    text in seen or seen in text
+                    for seen in seen_texts
+                )
+                if already_covered:
+                    continue
+                seen_texts.add(text)
+                result["blocks"].append({"text": text, "element": el})
+                links = _extract_links_from_element(el, driver)
+                for k in ("privacy_policy", "terms_of_service"):
+                    if result["links"][k] is None and links[k]:
+                        result["links"][k] = links[k]
             except Exception:
                 pass
-        if best_candidate:
-            result["text"] = best_candidate.text.strip()
-            result["element"] = best_candidate
-            for link_key, link_sel in LINK_SELECTORS.items():
-                try:
-                    link_el = best_candidate.find_element(By.CSS_SELECTOR, link_sel)
-                    result["links"][link_key] = link_el.get_attribute("href")
-                except Exception:
-                    pass
     except Exception:
         pass
 
+    # Aggregate all block texts with a space separator
+    result["text"] = " ".join(b["text"] for b in result["blocks"])
     return result
 
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  COMPLIANCE VALIDATOR — CONTACT FORM
+# ══════════════════════════════════════════════════════════════════════════════
 
 def validate_form(sf: ScoredForm, driver, firm_name: str, page_url: str) -> dict:
     """
@@ -349,15 +585,26 @@ def validate_form(sf: ScoredForm, driver, firm_name: str, page_url: str) -> dict
 
     form_el = sf.element
 
-    # ── 1. Locate consent block ───────────────────────────────────────────────
-    consent = find_consent_block(form_el, driver)
+    # ── 1. Aggregate ALL consent blocks ──────────────────────────────────────
+    consent = find_all_consent_blocks(form_el, driver)
     consent_text = consent["text"]
     result["consent_text_found"] = consent_text or None
+    result["consent_blocks_found"] = len(consent["blocks"])
 
-    # ── 2. Consent message content checks (short blurb on the form) ──────────
+    # ── 2. Policy link discovery (widening scope) ─────────────────────────────
+    policy_links = discover_policy_links(form_el, driver)
+
+    # Merge consent-block links with broader discovery (consent blocks take priority)
+    for k in ("privacy_policy", "terms_of_service"):
+        if consent["links"][k] and not policy_links[k]:
+            policy_links[k] = consent["links"][k]
+            policy_links[f"{k}_source"] = "consent_block"
+
+    result["policy_links"] = policy_links
+
+    # ── 3. Consent message content checks ────────────────────────────────────
     consent_checks = {}
 
-    # Firm name check — build pattern dynamically
     firm_pattern = re.compile(re.escape(firm_name), re.IGNORECASE) if firm_name else None
     firm_rule = {
         "key": "firm_name",
@@ -381,29 +628,51 @@ def validate_form(sf: ScoredForm, driver, firm_name: str, page_url: str) -> dict
         consent_checks[key] = {
             "pass": matched,
             "description": desc,
-            "detail": (
-                "✓ Found in consent text."
-                if matched
-                else "✗ Not found in consent text."
-            ),
+            "detail": "✓ Found in consent text." if matched else "✗ Not found in consent text.",
         }
 
-    # Link checks (from the consent block on the form)
+    # Link checks — use the enriched policy_links dict
     for link_key, friendly in [
         ("privacy_policy", "Privacy Policy"),
         ("terms_of_service", "Terms of Service"),
     ]:
-        href = consent["links"].get(link_key)
+        href   = policy_links.get(link_key)
+        source = policy_links.get(f"{link_key}_source")
+        source_note = f" (found in {source})" if source else ""
         consent_checks[link_key] = {
             "pass": bool(href),
             "description": f"Must include a link to {friendly}",
-            "detail": f"✓ Link found: {href}" if href else f"✗ No {friendly} link found.",
+            "detail": (
+                f"✓ Link found: {href}{source_note}"
+                if href
+                else f"✗ No {friendly} link found (checked consent block, form, page body, footer)."
+            ),
             "href": href,
+            "source": source,
         }
 
     result["checks"]["consent_message"] = consent_checks
 
-    # ── 3. Phone field checks ─────────────────────────────────────────────────
+    # ── 4. Footer link checks (separate, informational) ───────────────────────
+    footer_checks = {}
+    for link_key, friendly in [
+        ("privacy_policy", "Privacy Policy"),
+        ("terms_of_service", "Terms of Service"),
+    ]:
+        footer_href = policy_links.get(f"{link_key}_footer")
+        footer_checks[link_key] = {
+            "pass": bool(footer_href),
+            "description": f"{friendly} link must be present in the page footer",
+            "detail": (
+                f"✓ Footer link found: {footer_href}"
+                if footer_href
+                else f"✗ No {friendly} link found in the footer."
+            ),
+            "href": footer_href,
+        }
+    result["checks"]["footer_links"] = footer_checks
+
+    # ── 5. Phone field checks ─────────────────────────────────────────────────
     phone_checks = {}
 
     phone_els = []
@@ -462,7 +731,7 @@ def validate_form(sf: ScoredForm, driver, firm_name: str, page_url: str) -> dict
 
     result["checks"]["phone_field"] = phone_checks
 
-    # ── 4. Consent checkbox pre-checked check ─────────────────────────────────
+    # ── 6. Consent checkbox pre-checked check ─────────────────────────────────
     checkbox_checks = {}
 
     consent_cbs = []
@@ -510,12 +779,7 @@ def validate_form(sf: ScoredForm, driver, firm_name: str, page_url: str) -> dict
 #  TERMS OF SERVICE PAGE VALIDATOR
 # ══════════════════════════════════════════════════════════════════════════════
 
-
 def validate_tos_page(driver, tos_url: str, firm_name: str) -> dict:
-    """
-    Navigate to the Terms of Service URL, validate its title and required content.
-    Returns a structured dict with all check results.
-    """
     result = {
         "url": tos_url,
         "checks": {},
@@ -533,7 +797,6 @@ def validate_tos_page(driver, tos_url: str, firm_name: str) -> dict:
     # ── Title check ───────────────────────────────────────────────────────────
     try:
         page_title = driver.title or ""
-        # Also check the first visible h1
         h1_text = ""
         try:
             h1s = driver.find_elements(By.TAG_NAME, "h1")
@@ -551,11 +814,11 @@ def validate_tos_page(driver, tos_url: str, firm_name: str) -> dict:
         )
         result["checks"]["page_title"] = {
             "pass": title_pass,
-            "description": 'Page must be titled "Terms of Service" (or "[Firm Name]\'s Messaging Terms of Service")',
+            "description": 'Page must be titled "Terms of Service"',
             "detail": (
                 f"✓ Title '{page_title}' / H1 '{h1_text}' matches expected."
                 if title_pass
-                else f"✗ Title '{page_title}' / H1 '{h1_text}' does not match expected 'Terms of Service'."
+                else f"✗ Title '{page_title}' / H1 '{h1_text}' does not match 'Terms of Service'."
             ),
             "page_title": page_title,
             "h1_text": h1_text,
@@ -568,7 +831,7 @@ def validate_tos_page(driver, tos_url: str, firm_name: str) -> dict:
     try:
         body = driver.find_element(By.TAG_NAME, "body")
         page_text = body.text or ""
-        result["page_text_snapshot"] = page_text[:500]  # first 500 chars for debugging
+        result["page_text_snapshot"] = page_text[:500]
     except Exception:
         pass
 
@@ -623,18 +886,14 @@ def validate_tos_page(driver, tos_url: str, firm_name: str) -> dict:
         result["checks"][key] = {
             "pass": matched,
             "description": desc,
-            "detail": (
-                "✓ Found on page."
-                if matched
-                else f"✗ Not found on page."
-            ),
+            "detail": "✓ Found on page." if matched else "✗ Not found on page.",
         }
 
     # ── SMS / text keyword check ──────────────────────────────────────────────
     sms_matched = bool(SMS_KEYWORD_PATTERN.search(page_text))
     result["checks"]["sms_keyword"] = {
         "pass": sms_matched,
-        "description": 'Must include "SMS", "text messages", "text", or "Msg" (any are acceptable)',
+        "description": 'Must include "SMS", "text messages", "text", or "Msg"',
         "detail": (
             "✓ SMS-related keyword found."
             if sms_matched
@@ -649,12 +908,7 @@ def validate_tos_page(driver, tos_url: str, firm_name: str) -> dict:
 #  PRIVACY POLICY PAGE VALIDATOR
 # ══════════════════════════════════════════════════════════════════════════════
 
-
 def validate_privacy_page(driver, privacy_url: str) -> dict:
-    """
-    Navigate to the Privacy Policy URL, validate its title and required content.
-    Returns a structured dict with all check results.
-    """
     result = {
         "url": privacy_url,
         "checks": {},
@@ -722,7 +976,7 @@ def validate_privacy_page(driver, privacy_url: str) -> dict:
         ),
     }
 
-    # ── Third-party sharing section — check for SMS opt-in disclaimer if needed ──
+    # ── Third-party sharing + SMS opt-in disclaimer ───────────────────────────
     mentions_third_party_sharing = bool(THIRD_PARTY_SHARING_PATTERN.search(page_text))
     has_sms_disclaimer = bool(SMS_OPT_IN_DISCLAIMER.search(page_text))
 
@@ -730,27 +984,22 @@ def validate_privacy_page(driver, privacy_url: str) -> dict:
         result["checks"]["sms_opt_in_disclaimer"] = {
             "pass": has_sms_disclaimer,
             "description": (
-                "Since the policy mentions sharing data with third parties, it must include the "
-                "SMS opt-in disclaimer: "
-                '"All the above categories exclude text messaging originator opt-in data and consent; '
-                "this information will not be shared with any third parties, excluding aggregators "
-                'and providers of the Text Message services."'
+                "Since the policy mentions sharing data with third parties, it must include "
+                "the SMS opt-in disclaimer."
             ),
             "detail": (
                 "✓ SMS opt-in disclaimer found."
                 if has_sms_disclaimer
                 else (
                     "✗ Policy mentions third-party sharing but is missing the required SMS opt-in "
-                    "data disclaimer. Add: 'All the above categories exclude text messaging originator "
-                    "opt-in data and consent; this information will not be shared with any third "
-                    "parties, excluding aggregators and providers of the Text Message services.'"
+                    "data disclaimer."
                 )
             ),
             "third_party_sharing_detected": True,
         }
     else:
         result["checks"]["sms_opt_in_disclaimer"] = {
-            "pass": True,  # Not required if no third-party sharing mentioned
+            "pass": True,
             "description": "SMS opt-in disclaimer (only required if policy mentions third-party sharing)",
             "detail": "ℹ No third-party sharing language detected — disclaimer not required.",
             "third_party_sharing_detected": False,
@@ -789,7 +1038,7 @@ def compute_overall_pass(result: dict) -> bool:
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  MAIN
+#  DRIVER + MAIN
 # ══════════════════════════════════════════════════════════════════════════════
 
 def create_driver() -> webdriver.Chrome:
@@ -846,6 +1095,7 @@ def scan_url(url: str) -> dict:
                 "checks": {},
             }
         else:
+            # If the form was found inside an iframe, switch back into it for validation
             if sf.source != "main page":
                 try:
                     all_iframes = driver.find_elements(By.TAG_NAME, "iframe")
@@ -869,10 +1119,13 @@ def scan_url(url: str) -> dict:
 
             output = validate_form(sf, driver, firm_name, url)
 
+            # Switch back to main page context to discover policy links broadly
             driver.switch_to.default_content()
             driver.get(url)
             time.sleep(PAGE_SETTLE)
-            consent_links = {"privacy_policy": None, "terms_of_service": None}
+
+            # Re-discover policy links from the refreshed main page
+            # (covers cases where the form was in an iframe but links are on the host page)
             try:
                 forms = driver.find_elements(By.TAG_NAME, "form")
                 if forms:
@@ -882,13 +1135,31 @@ def scan_url(url: str) -> dict:
                         default=None,
                     )
                     if best_sf and best_sf.score >= MIN_SCORE:
-                        cb = find_consent_block(best_sf.element, driver)
-                        consent_links = cb["links"]
+                        refreshed_links = discover_policy_links(best_sf.element, driver)
+                        # Merge: only fill in links still missing from validate_form pass
+                        existing = output.get("policy_links", {})
+                        for k in ("privacy_policy", "terms_of_service"):
+                            if not existing.get(k) and refreshed_links.get(k):
+                                existing[k] = refreshed_links[k]
+                                existing[f"{k}_source"] = refreshed_links.get(f"{k}_source")
+                                # Also update the consent_message check
+                                if k in output.get("checks", {}).get("consent_message", {}):
+                                    href = refreshed_links[k]
+                                    source = refreshed_links.get(f"{k}_source")
+                                    friendly = "Privacy Policy" if k == "privacy_policy" else "Terms of Service"
+                                    output["checks"]["consent_message"][k] = {
+                                        "pass": bool(href),
+                                        "description": f"Must include a link to {friendly}",
+                                        "detail": f"✓ Link found: {href} (found in {source})" if href else output["checks"]["consent_message"][k]["detail"],
+                                        "href": href,
+                                        "source": source,
+                                    }
+                        output["policy_links"] = existing
             except Exception:
                 pass
 
-            tos_url = consent_links.get("terms_of_service")
-            privacy_url = consent_links.get("privacy_policy")
+            tos_url     = output.get("policy_links", {}).get("terms_of_service")
+            privacy_url = output.get("policy_links", {}).get("privacy_policy")
 
             if tos_url:
                 logger.info("Terms of Service URL: %s", tos_url)
@@ -896,12 +1167,12 @@ def scan_url(url: str) -> dict:
             else:
                 output["tos_page"] = {
                     "url": None,
-                    "error": "No Terms of Service link found in the consent block.",
+                    "error": "No Terms of Service link found.",
                     "checks": {
                         "page_reachable": {
                             "pass": False,
                             "description": "Terms of Service page must be linked and reachable",
-                            "detail": "✗ No Terms of Service URL found in the form consent block.",
+                            "detail": "✗ No Terms of Service URL found (checked consent block, form, page body, footer).",
                         }
                     },
                 }
@@ -912,12 +1183,12 @@ def scan_url(url: str) -> dict:
             else:
                 output["privacy_page"] = {
                     "url": None,
-                    "error": "No Privacy Policy link found in the consent block.",
+                    "error": "No Privacy Policy link found.",
                     "checks": {
                         "page_reachable": {
                             "pass": False,
                             "description": "Privacy Policy page must be linked and reachable",
-                            "detail": "✗ No Privacy Policy URL found in the form consent block.",
+                            "detail": "✗ No Privacy Policy URL found (checked consent block, form, page body, footer).",
                         }
                     },
                 }
