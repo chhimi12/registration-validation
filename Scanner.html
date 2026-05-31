@@ -129,6 +129,14 @@
       background: #fcebea;
       color: #8b1a1a;
     }
+    
+    .error-container {
+      padding: 20px;
+      background: #fdf0f0;
+      border: 1px solid #e8c0c0;
+      color: #8b1a1a;
+      border-radius: 8px;
+    }
   </style>
 </head>
 <body>
@@ -136,7 +144,7 @@
     <header class="tree-header">
       <h1>SMS Registration Compliance Check</h1>
     </header>
-    <div class="scan-bar" style="padding:16px 24px; border-bottom:1px solid #ece9e3; background:#fff;">
+    <div class="scan-bar" style="padding:16px 24px; border-bottom:1px solid #ece9e3; background:#fff; display: flex;">
       <input type="text" id="urlInput" placeholder="https://example.com" style="flex:1; padding:8px 12px; font-family: IBM Plex Mono, monospace;" />
       <button id="loadBtn" style="margin-left:12px; padding:8px 12px; font-family: IBM Plex Mono, monospace;" onclick="loadData()">Check</button>
     </div>
@@ -261,6 +269,11 @@
         });
 
         if (!res.ok) {
+          // Explicitly check for a 429 Too Many Requests status
+          if (res.status === 429) {
+            throw new Error("Another job is in progress, please run the check in two minutes.");
+          }
+
           let message = `Server returned ${res.status}`;
           try {
             const err = await res.json();
@@ -274,7 +287,12 @@
         const displayData = buildDisplayData(data);
         buildTree(root, displayData);
       } catch (err) {
-        root.innerHTML = `<div style="padding:20px;background:#fdf0f0;border:1px solid #e8c0c0;color:#8b1a1a">Error: ${esc(err.message)}</div>`;
+        // Safe implementation replacing the missing esc() call with textContent
+        root.innerHTML = '';
+        const errDiv = document.createElement('div');
+        errDiv.className = 'error-container';
+        errDiv.textContent = `Error: ${err.message}`;
+        root.appendChild(errDiv);
       } finally {
         btn.disabled = false;
       }

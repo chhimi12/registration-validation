@@ -244,10 +244,8 @@ def extract_firm_name(driver, page_url: str) -> str:
             try:
                 raw = script.get_attribute("innerHTML") or ""
                 data = json.loads(raw)
-                # data may be a single object or a list
                 items = data if isinstance(data, list) else [data]
                 for item in items:
-                    # Handle @graph arrays
                     if "@graph" in item:
                         items.extend(item["@graph"])
                         continue
@@ -288,14 +286,12 @@ def extract_firm_name(driver, page_url: str) -> str:
         for sel in FIRM_NAME_FOOTER_SELECTORS:
             els = driver.find_elements(By.CSS_SELECTOR, sel)
             for el in els:
-                # Try alt attribute (images), then text content
                 text = (
                     el.get_attribute("alt")
                     or el.get_attribute("title")
                     or el.text
                     or ""
                 ).strip()
-                # Skip generic labels
                 if text and len(text) > 4 and not re.match(r"^(home|logo|menu|nav)$", text, re.I):
                     logger.info("Firm name from footer element (%s): %s", sel, text)
                     candidates.append(text)
@@ -323,7 +319,6 @@ def extract_firm_name(driver, page_url: str) -> str:
     # ── 5. <title> tag (noise-stripped) ──────────────────────────────────────
     try:
         title = driver.title or ""
-        # Keep only the part before the first separator
         title = re.sub(r"\s*[-|–—]\s*.*$", "", title).strip()
         if title and len(title) > 2:
             candidates.append(title)
@@ -389,16 +384,6 @@ def discover_policy_links(form_el, driver) -> Dict:
       2. The form element itself
       3. The full page body
       4. The footer (stored separately for the footer-link check)
-
-    Returns:
-      {
-        "privacy_policy": url | None,
-        "terms_of_service": url | None,
-        "privacy_policy_footer": url | None,
-        "terms_of_service_footer": url | None,
-        "privacy_policy_source": "consent_block" | "form" | "page" | "footer" | None,
-        "terms_of_service_source": ...
-      }
     """
     found: Dict[str, Optional[str]] = {"privacy_policy": None, "terms_of_service": None}
     sources: Dict[str, Optional[str]] = {"privacy_policy": None, "terms_of_service": None}
@@ -457,7 +442,6 @@ def discover_policy_links(form_el, driver) -> Dict:
             for k in ("privacy_policy", "terms_of_service"):
                 if footer_links[k] is None and fl[k]:
                     footer_links[k] = fl[k]
-                    # Also promote to main found if still missing
                     if found[k] is None:
                         found[k] = fl[k]
                         sources[k] = "footer"
@@ -481,15 +465,7 @@ def discover_policy_links(form_el, driver) -> Dict:
 def find_all_consent_blocks(form_el, driver) -> dict:
     """
     Locate ALL consent / SMS disclosure blocks inside the form and aggregate
-    their text.  This handles forms where the disclosure is split across
-    multiple <div> / <p> / <label> elements with different CSS classes.
-
-    Returns:
-      {
-        "text": "<aggregated text of all consent blocks>",
-        "blocks": [ { "text": ..., "element": el }, ... ],
-        "links": { "privacy_policy": url | None, "terms_of_service": url | None },
-      }
+    their text.
     """
     result = {
         "text": "",
@@ -541,8 +517,6 @@ def find_all_consent_blocks(form_el, driver) -> dict:
                     or "reply stop" in text.lower()
                 ):
                     continue
-                # Skip elements whose text is fully contained in an already-found block
-                # (avoids parent/child duplication)
                 already_covered = any(
                     text in seen or seen in text
                     for seen in seen_texts
@@ -560,7 +534,6 @@ def find_all_consent_blocks(form_el, driver) -> dict:
     except Exception:
         pass
 
-    # Aggregate all block texts with a space separator
     result["text"] = " ".join(b["text"] for b in result["blocks"])
     return result
 
@@ -594,7 +567,6 @@ def validate_form(sf: ScoredForm, driver, firm_name: str, page_url: str) -> dict
     # ── 2. Policy link discovery (widening scope) ─────────────────────────────
     policy_links = discover_policy_links(form_el, driver)
 
-    # Merge consent-block links with broader discovery (consent blocks take priority)
     for k in ("privacy_policy", "terms_of_service"):
         if consent["links"][k] and not policy_links[k]:
             policy_links[k] = consent["links"][k]
@@ -631,7 +603,6 @@ def validate_form(sf: ScoredForm, driver, firm_name: str, page_url: str) -> dict
             "detail": "✓ Found in consent text." if matched else "✗ Not found in consent text.",
         }
 
-    # Link checks — use the enriched policy_links dict
     for link_key, friendly in [
         ("privacy_policy", "Privacy Policy"),
         ("terms_of_service", "Terms of Service"),
@@ -1044,6 +1015,8 @@ def compute_overall_pass(result: dict) -> bool:
 def create_driver() -> webdriver.Chrome:
     options = webdriver.ChromeOptions()
     options.page_load_strategy = PAGE_LOAD_STRATEGY
+
+    # ── Headless + sandboxing ─────────────────────────────────────────────────
     options.add_argument("--headless=new")
     options.add_argument("--no-sandbox")
     options.add_argument("--disable-dev-shm-usage")
@@ -1051,6 +1024,29 @@ def create_driver() -> webdriver.Chrome:
     options.add_argument("--disable-extensions")
     options.add_argument("--remote-debugging-pipe")
     options.add_argument("--window-size=1920,1080")
+
+    # ── Memory / process optimisations (critical for 512 MB Render free tier) ─
+    options.add_argument("--single-process")              # one process instead of browser+renderer
+    options.add_argument("--disable-dev-shm-usage")       # already set, but explicit
+    options.add_argument("--memory-pressure-off")
+    options.add_argument("--disable-features=VizDisplayCompositor")
+    options.add_argument("--disable-background-networking")
+    options.add_argument("--disable-default-apps")
+    options.add_argument("--disable-sync")
+    options.add_argument("--disable-translate")
+    options.add_argument("--hide-scrollbars")
+    options.add_argument("--metrics-recording-only")
+    options.add_argument("--mute-audio")
+    options.add_argument("--no-first-run")
+    options.add_argument("--safebrowsing-disable-auto-update")
+    options.add_argument("--ignore-certificate-errors")
+    options.add_argument("--disable-infobars")
+
+    # ── Network: block media and images (not needed for text/form scraping) ───
+    options.add_argument("--blink-settings=imagesEnabled=false")
+
+    # ── Cap Chrome's JS heap to keep RSS under 512 MB ────────────────────────
+    options.add_argument("--js-flags=--max-old-space-size=128")
 
     chrome_binary = os.getenv("CHROME_BINARY")
     if chrome_binary:
@@ -1061,6 +1057,17 @@ def create_driver() -> webdriver.Chrome:
     driver = webdriver.Chrome(service=service, options=options)
     driver.set_page_load_timeout(PAGE_LOAD_TIMEOUT)
     return driver
+
+
+def _wait_for_body(driver, timeout: float = None) -> None:
+    """Block until <body> is present, with a fallback fixed sleep on failure."""
+    t = timeout or WAIT_SECONDS
+    try:
+        WebDriverWait(driver, t).until(
+            EC.presence_of_element_located((By.TAG_NAME, "body"))
+        )
+    except Exception:
+        time.sleep(min(t, PAGE_SETTLE))
 
 
 def scan_url(url: str) -> dict:
@@ -1079,7 +1086,7 @@ def scan_url(url: str) -> dict:
     try:
         logger.info("Opening scan URL: %s", url)
         driver.get(url)
-        time.sleep(PAGE_SETTLE)
+        _wait_for_body(driver)   # ← replaces bare time.sleep(PAGE_SETTLE)
 
         firm_name = extract_firm_name(driver, url)
         logger.info("Firm name detected: %s", firm_name)
@@ -1103,7 +1110,7 @@ def scan_url(url: str) -> dict:
                         src = iframe.get_attribute("src") or ""
                         if src and src[:80] in sf.source:
                             driver.switch_to.frame(iframe)
-                            time.sleep(IFRAME_SETTLE)
+                            _wait_for_body(driver, IFRAME_SETTLE)
                             forms = driver.find_elements(By.TAG_NAME, "form")
                             if forms:
                                 best = max(
@@ -1119,13 +1126,15 @@ def scan_url(url: str) -> dict:
 
             output = validate_form(sf, driver, firm_name, url)
 
-            # Switch back to main page context to discover policy links broadly
+            # ── Re-discover policy links from the main page without a full reload ──
+            # Switch back to default content; if the form was on the main page we are
+            # already there. Only reload when the form came from an iframe so that
+            # links on the host page (outside the iframe) can be found.
             driver.switch_to.default_content()
-            driver.get(url)
-            time.sleep(PAGE_SETTLE)
+            if sf.source != "main page":
+                driver.get(url)
+                _wait_for_body(driver)
 
-            # Re-discover policy links from the refreshed main page
-            # (covers cases where the form was in an iframe but links are on the host page)
             try:
                 forms = driver.find_elements(By.TAG_NAME, "form")
                 if forms:
@@ -1136,13 +1145,11 @@ def scan_url(url: str) -> dict:
                     )
                     if best_sf and best_sf.score >= MIN_SCORE:
                         refreshed_links = discover_policy_links(best_sf.element, driver)
-                        # Merge: only fill in links still missing from validate_form pass
                         existing = output.get("policy_links", {})
                         for k in ("privacy_policy", "terms_of_service"):
                             if not existing.get(k) and refreshed_links.get(k):
                                 existing[k] = refreshed_links[k]
                                 existing[f"{k}_source"] = refreshed_links.get(f"{k}_source")
-                                # Also update the consent_message check
                                 if k in output.get("checks", {}).get("consent_message", {}):
                                     href = refreshed_links[k]
                                     source = refreshed_links.get(f"{k}_source")
