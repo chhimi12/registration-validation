@@ -35,6 +35,21 @@
       letter-spacing: -0.03em;
     }
 
+    /* Added style for the description paragraph */
+    .tree-description {
+      padding: 16px 24px 0 24px;
+      font-size: 14px;
+      color: #555;
+      line-height: 1.6;
+    }
+
+    .scan-bar {
+      padding: 16px 24px;
+      border-bottom: 1px solid #ece9e3;
+      background: #fff;
+      display: flex;
+    }
+
     .tree-container {
       padding: 20px 24px;
     }
@@ -144,8 +159,13 @@
     <header class="tree-header">
       <h1>SMS Registration Compliance Check</h1>
     </header>
-    <div class="scan-bar" style="padding:16px 24px; border-bottom:1px solid #ece9e3; background:#fff; display: flex;">
-      <input type="text" id="urlInput" placeholder="https://example.com" style="flex:1; padding:8px 12px; font-family: IBM Plex Mono, monospace;" />
+    
+    <div class="tree-description">
+     Enter the URL where the contact form lives. This tool will check the form, navigate to your Terms of Service, and review your Privacy Policy to complete the compliance check. Note: Analysis may take up to 2 minutes.
+    </div>
+
+    <div class="scan-bar">
+      <input type="text" id="urlInput" placeholder="https://example.com/contact" style="flex:1; padding:8px 12px; font-family: IBM Plex Mono, monospace;" />
       <button id="loadBtn" style="margin-left:12px; padding:8px 12px; font-family: IBM Plex Mono, monospace;" onclick="loadData()">Check</button>
     </div>
     <section class="tree-container" id="treeRoot"></section>
@@ -269,7 +289,6 @@
         });
 
         if (!res.ok) {
-          // Explicitly check for a 429 Too Many Requests status
           if (res.status === 429) {
             throw new Error("Another job is in progress, please run the check in two minutes.");
           }
@@ -287,7 +306,6 @@
         const displayData = buildDisplayData(data);
         buildTree(root, displayData);
       } catch (err) {
-        // Safe implementation replacing the missing esc() call with textContent
         root.innerHTML = '';
         const errDiv = document.createElement('div');
         errDiv.className = 'error-container';
