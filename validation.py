@@ -71,7 +71,7 @@ from validation_rules import (
 # ── CONFIG ────────────────────────────────────────────────────────────────────
 logger = logging.getLogger(__name__)
 
-DEFAULT_URL        = "https://www.spetsasbuist.com/contact/"
+DEFAULT_URL        = "https://reddirtlegal.com/contact/"
 WAIT_SECONDS       = int(os.getenv("SELENIUM_WAIT_SECONDS", "10"))
 PAGE_SETTLE        = float(os.getenv("PAGE_SETTLE_SECONDS", "2"))
 IFRAME_SETTLE      = float(os.getenv("IFRAME_SETTLE_SECONDS", "1"))
@@ -760,7 +760,8 @@ def validate_tos_page(driver, tos_url: str, firm_name: str) -> dict:
     logger.info("Navigating to Terms of Service page: %s", tos_url)
     try:
         driver.get(tos_url)
-        time.sleep(PAGE_SETTLE)
+        _wait_for_body(driver)
+        _dismiss_cookie_banner(driver)
     except Exception as e:
         result["error"] = f"Could not load ToS page: {e}"
         return result
@@ -889,7 +890,8 @@ def validate_privacy_page(driver, privacy_url: str) -> dict:
     logger.info("Navigating to Privacy Policy page: %s", privacy_url)
     try:
         driver.get(privacy_url)
-        time.sleep(PAGE_SETTLE)
+        _wait_for_body(driver)
+        _dismiss_cookie_banner(driver)
     except Exception as e:
         result["error"] = f"Could not load Privacy Policy page: {e}"
         return result
@@ -1025,6 +1027,20 @@ def create_driver() -> webdriver.Chrome:
     options.add_argument("--remote-debugging-pipe")
     options.add_argument("--window-size=1920,1080")
 
+    # ── Cookies: enable all cookies so sites don't block with a cookie wall ───
+    # Chrome headless has cookies enabled by default, but some sites also check
+    # for a real user-agent. Spoof one so cookie-wall JS thinks we're a browser.
+    options.add_argument(
+        "--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/124.0.0.0 Safari/537.36"
+    )
+    # Explicitly allow all cookies via Chrome prefs (covers content-settings checks)
+    options.add_experimental_option("prefs", {
+        "profile.default_content_setting_values.cookies": 1,   # 1 = allow
+        "profile.block_third_party_cookies": False,
+    })
+
     # ── Memory / process optimisations (critical for 512 MB Render free tier) ─
     options.add_argument("--single-process")              # one process instead of browser+renderer
     options.add_argument("--disable-dev-shm-usage")       # already set, but explicit
@@ -1059,6 +1075,92 @@ def create_driver() -> webdriver.Chrome:
     return driver
 
 
+# Common button texts / aria-labels used by cookie consent banners
+_COOKIE_BUTTON_TEXTS = re.compile(
+    r"^(accept\s*(all(\s+cookies?)?)?|allow\s*(all(\s+cookies?)?)?|"
+    r"i\s+accept|agree|got\s+it|ok|okay|continue|close|"
+    r"accept\s+&\s+close|accept\s+and\s+close)$",
+    re.IGNORECASE,
+)
+
+# CSS selectors that commonly wrap cookie consent accept buttons
+_COOKIE_BUTTON_SELECTORS = (
+    # Specific well-known CMPs
+    "#onetrust-accept-btn-handler",
+    "#CybotCookiebotDialogBodyButtonAccept",
+    ".cc-accept",
+    ".cc-btn.cc-allow",
+    "[data-cookiebanner='accept_button']",
+    "[data-gdpr-expression='acceptAll']",
+    # Generic patterns
+    "button[id*='accept' i][id*='cookie' i]",
+    "button[class*='accept' i][class*='cookie' i]",
+    "a[id*='accept' i][id*='cookie' i]",
+    "[aria-label*='accept' i][aria-label*='cookie' i]",
+    "[aria-label*='agree' i]",
+)
+
+_COOKIE_WALL_PATTERN = re.compile(
+    r"(cookies?\s+(must\s+be\s+enabled|are\s+required|are\s+disabled)|"
+    r"please\s+enable\s+cookies?|"
+    r"this\s+site\s+requires\s+cookies?|"
+    r"your\s+browser\s+(does\s+not\s+accept|has\s+(cookies?\s+)?disabled))",
+    re.IGNORECASE,
+)
+
+
+def _dismiss_cookie_banner(driver) -> bool:
+    """
+    Try to click an Accept / Allow button on cookie consent banners and walls.
+    Returns True if a button was successfully clicked, False otherwise.
+
+    Tries in order:
+      1. Known CMP-specific selectors
+      2. Any <button> / <a> whose visible text matches common accept phrases
+    """
+    # ── Strategy 1: well-known CMP selectors ─────────────────────────────────
+    for sel in _COOKIE_BUTTON_SELECTORS:
+        try:
+            btns = driver.find_elements(By.CSS_SELECTOR, sel)
+            for btn in btns:
+                if btn.is_displayed():
+                    driver.execute_script("arguments[0].click();", btn)
+                    logger.info("Dismissed cookie banner via selector: %s", sel)
+                    time.sleep(0.5)
+                    return True
+        except Exception:
+            pass
+
+    # ── Strategy 2: text-match on any visible button / link ───────────────────
+    try:
+        candidates = driver.find_elements(By.CSS_SELECTOR, "button, a[role='button'], a[href='#']")
+        for el in candidates:
+            try:
+                if not el.is_displayed():
+                    continue
+                text = (el.text or el.get_attribute("aria-label") or "").strip()
+                if _COOKIE_BUTTON_TEXTS.match(text):
+                    driver.execute_script("arguments[0].click();", el)
+                    logger.info("Dismissed cookie banner by text match: '%s'", text)
+                    time.sleep(0.5)
+                    return True
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+    return False
+
+
+def _is_cookie_wall(driver) -> bool:
+    """Return True if the current page appears to be a cookie-required wall."""
+    try:
+        body_text = driver.find_element(By.TAG_NAME, "body").text or ""
+        return bool(_COOKIE_WALL_PATTERN.search(body_text))
+    except Exception:
+        return False
+
+
 def _wait_for_body(driver, timeout: float = None) -> None:
     """Block until <body> is present, with a fallback fixed sleep on failure."""
     t = timeout or WAIT_SECONDS
@@ -1086,7 +1188,29 @@ def scan_url(url: str) -> dict:
     try:
         logger.info("Opening scan URL: %s", url)
         driver.get(url)
-        _wait_for_body(driver)   # ← replaces bare time.sleep(PAGE_SETTLE)
+        _wait_for_body(driver)
+
+        # ── Handle cookie consent banners / walls ─────────────────────────────
+        _dismiss_cookie_banner(driver)
+        if _is_cookie_wall(driver):
+            # Banner dismissed but page is still a wall — reload and retry once
+            logger.info("Cookie wall detected after banner dismissal; reloading...")
+            driver.get(url)
+            _wait_for_body(driver)
+            _dismiss_cookie_banner(driver)
+            if _is_cookie_wall(driver):
+                return {
+                    "url": url,
+                    "firm_name_detected": None,
+                    "overall_pass": False,
+                    "error": (
+                        "This page requires cookies to be enabled. "
+                        "The scanner attempted to accept the cookie consent banner but "
+                        "the page still blocked access. The site may use a hard cookie wall "
+                        "that cannot be bypassed automatically."
+                    ),
+                    "checks": {},
+                }
 
         firm_name = extract_firm_name(driver, url)
         logger.info("Firm name detected: %s", firm_name)
